@@ -1,7 +1,14 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
+import csv
+import os
+import json
+
 
 class InvalidTransactionError(Exception):
+    pass
+
+class FileLoadError(Exception):
     pass
 
 class Transaction(ABC):
@@ -88,4 +95,131 @@ class Transaction(ABC):
     def status(self, value):
         value = str(value if value is not None else "").strip()
         self._status = value.title() if value else "Completed"
+
+    @abstractmethod
+    def get_net_impact(self) -> str:
+        pass
+
+    @abstractmethod
+    def get_type(self) -> str:
+        pass
+
+    def display_time(self) -> str:
+        return datetime.strptime(self._time, "%H:%M:%S").strftime("%I:%M %p")
+
+    def display_amount(self) -> str:
+        sign = "+" if self.get_net_impact() > 0 else "-"
+        return f"{sign} Rs. {self.amount:,.2f}"
+
+    def to_ui_row(self) -> tuple:
+        return (self.city, self.date, self.display_time(), self.get_type(), self.display_amount())
+
+    def to_export_row(self) -> list:
+        return [self.city, self.date, self.time, self.get_type(), f"{self.amount:.2f}", self.status]
+
+    def __repr__self(self):
+        return (f"{type(self).__name__}({self.city}, {self.date}, "f"{self.time}, {self.amount:.2f}, {self.status})")
+
+
+class CreditTransaction(Transaction):
+    def __init__(self, city, date, time, amount, status="Completed"):
+        super().__init__(city, date, time, amount, status)
+
+    def get_net_impact(self) -> float:
+        return +self.amount
+
+    def get_type(self) -> str:
+        return "Credit"
+
+
+
+class DebitTransaction(Transaction):
+    def __init__(self, city, date, time, amount, status="Completed"):
+        super().__init__(city, date, time, amount, status)
+
+    def get_net_impact(self) -> float:
+        return -self.amount
+
+    def get_type(self) -> str:
+        return "Debit"
+
+
+def build_transaction(record:dict) -> Transaction:
+    ttype = str(record.get("type", "")).strip().lower()
+    args = (record.get("city"), record.get("date"), record.get("time"), record.get("amount"), record.get("status"))
+
+    if ttype == "credit":
+        return CreditTransaction(*args)
+    if ttype == "debit":
+        return DebitTransaction(*args)
+    raise InvalidTransactionError(f"Unknown Transaction Type '{ttype}'.")
+
+
+class FileLoader(ABC):
+    @abstractmethod
+    def parse_file(self, filepath: str) -> list:
+        pass
+
+    def _try_add(self, record, results: list, label: str):
+        try:
+            if not isinstance(record, dict):
+                raise InvalidTransactionError("Record is not a key/value object.")
+            clean = {str(k).strip().lower(): v for k, v in record.items()
+                     if k is not None}
+            results.append(build_transaction(clean))
+        except InvalidTransactionError as e:
+            self.skipped.append(f"{label}: {e}")
+        except Exception as e:
+            self.skipped.append(f"{label}: unexpected error ({e})")
+
+
+class CSVLoader(FileLoader):
+    def parse_file(self, filepath: str) -> list:
+        self.skipped = []
+        results = []
+        try:
+            with open(filepath, "r", newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                line_no = 1
+                for row in reader:
+                    Line_no += 1
+                    try:
+                        self._try_add(row, results, f"Line {line_no}")
+                    except Exception as e:
+                        self.skipped.append(f"Line {line_no}: {e}")
+        except (OSError, csv.Error, UnicodeDecodeError) as e:
+            raise FileLoadError(f"Could not read '{os.path.basename(filepath)}': {e}")
+        return results
+        
+
+class JSONLoader(FileLoader):
+    def parse_file(self, filepath: str) -> list:
+        self.skipped = []
+        results = []
+        try:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise FileLoadError(f"Could not read '{os.path.basename(filepath)}': {e}")
+ 
+        if isinstance(data, dict):
+            data = data.get("transactions", [])
+        if not isinstance(data, list):
+            raise FileLoadError("JSON file must contain a list of transactions.")
+ 
+        index = 0
+        for item in data:
+            index += 1
+            self._try_add(item, results, f"Record {index}")
+        return results
+ 
+ 
+def get_loader(filepath: str) -> FileLoader:
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in (".csv", ".txt"):
+        return CSVLoader()
+    if ext == ".json":
+        return JSONLoader()
+    raise FileLoadError(f"Unsupported file type '{ext}'. Use .csv or .json only.")
+
 
