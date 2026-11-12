@@ -223,3 +223,99 @@ def get_loader(filepath: str) -> FileLoader:
     raise FileLoadError(f"Unsupported file type '{ext}'. Use .csv or .json only.")
 
 
+class IngestionQueue:
+ 
+    def __init__(self):
+        self._items = []
+ 
+    def enqueue(self, item):
+        self._items.append(item)
+ 
+    def dequeue(self):
+        if self.is_empty():
+            raise IndexError("dequeue from empty IngestionQueue")
+        return self._items.pop(0)
+ 
+    def is_empty(self) -> bool:
+        return len(self._items) == 0
+ 
+    def __len__(self):
+        return len(self._items)
+ 
+ 
+class FilterHistoryStack:
+ 
+    def __init__(self):
+        self._items = []
+ 
+    def push(self, state: dict):
+        self._items.append(dict(state))
+ 
+    def pop(self) -> dict:
+        if self.is_empty():
+            raise IndexError("pop from empty FilterHistoryStack")
+        return self._items.pop()
+ 
+    def peek(self):
+        return dict(self._items[-1]) if self._items else None
+ 
+    def is_empty(self) -> bool:
+        return len(self._items) == 0
+ 
+    def clear(self):
+        self._items = []
+ 
+    def __len__(self):
+        return len(self._items)
+ 
+ 
+class AuditNode:
+ 
+    def __init__(self, data: tuple):
+        if not isinstance(data, tuple) or len(data) != 4:
+            raise ValueError("AuditNode requires a 4-element tuple.")
+        self.data = data
+        self.next = None
+ 
+ 
+class ExportAuditLinkedList:
+ 
+    def __init__(self):
+        self.head = None
+        self.tail = None
+        self._size = 0
+ 
+    def append(self, data: tuple):
+        node = AuditNode(data)
+        if self.head is None:
+            self.head = node
+        else:
+            self.tail.next = node
+        self.tail = node
+        self._size += 1
+ 
+    def traverse(self) -> list:
+        entries = []
+        current = self.head
+        while current is not None:
+            entries.append(current.data)
+            current = current.next
+        return entries
+ 
+    def write_to_file(self, filepath: str):
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("FINPAY AUDIT LOG\n")
+            f.write("=" * 72 + "\n")
+            f.write(f"{'Timestamp':<21}{'Action':<16}{'Records':>9}{'Net Amount (Rs.)':>20}\n")
+            f.write("-" * 72 + "\n")
+            current = self.head
+            while current is not None:
+                timestamp, action, count, net = current.data
+                f.write(f"{timestamp:<21}{action:<16}{count:>9}{net:>20,.2f}\n")
+                current = current.next
+ 
+    def __len__(self):
+        return self._size
+
+
+
