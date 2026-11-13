@@ -318,4 +318,206 @@ class ExportAuditLinkedList:
         return self._size
 
 
+class FinPayEngine:
+    EXPORT_FILE = "exported_transactions.csv"
+    AUDIT_FILE = "audit_log.txt"
+ 
+    def __init__(self, output_dir: str = "."):
+        self.output_dir = output_dir
+        self.ingestion_queue = IngestionQueue()      
+        self.transactions = []                       
+        self.visible = []                            
+        self.unique_cities = set()                   
+        self.unique_dates = set()                    
+        self.filter_stack = FilterHistoryStack()     
+        self.audit_log = ExportAuditLinkedList()     
+        self.current_filters = self._empty_filters()
+        self.skipped_rows = []
+        self.loaded_file = None
+ 
+    
+    @staticmethod
+    def _empty_filters() -> dict:
+        return {"city": "All", "date": "All", "type": "All",
+                "time_from": "", "time_to": ""}
+ 
+    @staticmethod
+    def _net(transactions: list) -> float:
+        total = 0.0
+        for t in transactions:
+            total += t.get_net_impact()
+        return round(total, 2)
+ 
+    def _log(self, action_type: str, transactions: list):
+        entry = (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 action_type, len(transactions), self._net(transactions))
+        self.audit_log.append(entry)
+ 
+    @staticmethod
+    def _norm_time(value) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(value, fmt).strftime("%H:%M:%S")
+            except ValueError:
+                continue
+        raise InvalidTransactionError(f"Invalid time '{value}'. Use HH:MM (24-hour).")
+ 
+    # ---------------- loading ----------------
+    def load_data(self, filepath: str) -> int:
+        loader = get_loader(filepath)
+        parsed = loader.parse_file(filepath)
+        self.skipped_rows = list(loader.skipped)
+ 
+        for item in parsed:
+            self.ingestion_queue.enqueue(item)
+        validated = []
+        while not self.ingestion_queue.is_empty():
+            item = self.ingestion_queue.dequeue()
+            if item.amount <= 0:
+                self.skipped_rows.append(f"Rejected {item!r}: amount <= 0")
+                continue
+            validated.append(item)
+ 
+        self.transactions = validated
+ 
+        self.unique_cities = set()
+        self.unique_dates = set()
+        for t in self.transactions:
+            self.unique_cities.add(t.city)
+            self.unique_dates.add(t.date)
+ 
+        self.filter_stack.clear()
+        self.current_filters = self._empty_filters()
+        self.visible = list(self.transactions)
+        self.loaded_file = filepath
+        self._log("LOAD", self.visible)
+        return len(self.transactions)
+ 
+    def get_city_options(self) -> list:
+        return ["All"] + sorted(self.unique_cities)
+ 
+    def get_date_options(self) -> list:
+        return ["All"] + sorted(self.unique_dates, reverse=True)
+ 
+    def _matches(self, t: Transaction, f: dict) -> bool:
+        if f["city"] != "All" and t.city != f["city"]:
+            return False
+        if f["date"] != "All" and t.date != f["date"]:
+            return False
+        if f["type"] != "All" and t.get_type() != f["type"]:
+            return False
+        if f["time_from"] and t.time < f["time_from"]:
+            return False
+        if f["time_to"] and t.time > f["time_to"]:
+            return False
+        return True
+ 
+    def _filter_with(self, f: dict) -> list:
+        result = []
+        for t in self.transactions:
+            if self._matches(t, f):
+                result.append(t)
+        return result
+ 
+    def apply_filters(self, city="All", date="All", ttype="All",
+                      time_from="", time_to="") -> list:
+        new_filters = {
+            "city": city or "All",
+            "date": date or "All",
+            "type": ttype or "All",
+            "time_from": self._norm_time(time_from),
+            "time_to": self._norm_time(time_to),
+        }
+        if (new_filters["time_from"] and new_filters["time_to"]
+                and new_filters["time_from"] > new_filters["time_to"]):
+            raise InvalidTransactionError("'From' time cannot be after 'To' time.")
+ 
+        self.filter_stack.push(self.current_filters)
+        self.current_filters = new_filters
+        self.visible = self._filter_with(new_filters)
+        self._log("FILTER", self.visible)
+        return self.visible
+ 
+    def revert_last_filter(self) -> list:
+        if self.filter_stack.is_empty():
+            raise IndexError("There is no earlier filter to revert to.")
+        self.current_filters = self.filter_stack.pop()
+        self.visible = self._filter_with(self.current_filters)
+        self._log("REVERT", self.visible)
+        return self.visible
+ 
+    def clear_filters(self) -> list:
+        self.filter_stack.clear()
+        self.current_filters = self._empty_filters()
+        self.visible = list(self.transactions)
+        self._log("CLEAR", self.visible)
+        return self.visible
+ 
+    # ---------------- UI data ----------------
+    def get_ui_rows(self) -> list:
+        rows = []
+        for t in self.visible:
+            rows.append(t.to_ui_row())
+        return rows
+ 
+    def get_summary(self) -> dict:
+        credits = debits = 0.0
+        for t in self.visible:
+            if t.get_type() == "Credit":
+                credits += t.amount
+            else:
+                debits += t.amount
+        net = self._net(self.visible)
+        if abs(net - round(credits - debits, 2)) > 0.01:
+            raise InvalidTransactionError("Balance mismatch detected.")
+        return {"count": len(self.visible), "total_loaded": len(self.transactions),
+                "credits": round(credits, 2), "debits": round(debits, 2), "net": net}
+ 
+    # ---------------- export ----------------
+    def export(self) -> tuple:
+        if not self.visible:
+            raise InvalidTransactionError("There are no transactions to export.")
+        export_path = os.path.join(self.output_dir, self.EXPORT_FILE)
+        audit_path = os.path.join(self.output_dir, self.AUDIT_FILE)
+        try:
+            with open(export_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["City", "Date", "Time", "Type", "Amount", "Status"])
+                for t in self.visible:
+                    writer.writerow(t.to_export_row())
+            self._log("EXPORT", self.visible)
+            self.audit_log.write_to_file(audit_path)
+        except OSError as e:
+            raise FileLoadError(f"Export failed: {e}")
+        return export_path, audit_path
+ 
+ 
+
+if __name__ == "__main__":
+    import sys
+ 
+    if len(sys.argv) < 2:
+        print("Usage: python backend.py <transactions.csv|json|txt>")
+        sys.exit(1)
+ 
+    engine = FinPayEngine()
+    count = engine.load_data(sys.argv[1])
+    print(f"Loaded {count} valid transactions; skipped {len(engine.skipped_rows)}")
+    for msg in engine.skipped_rows:
+        print("  skipped ->", msg)
+    print("Cities:", engine.get_city_options())
+    print("Dates :", engine.get_date_options())
+    print("Summary:", engine.get_summary())
+    engine.apply_filters(date="2026-10-19", ttype="Credit")
+    for row in engine.get_ui_rows():
+        print("  ", row)
+    engine.revert_last_filter()
+    print("After revert:", engine.get_summary()["count"], "rows")
+    print("Exported:", engine.export())
+
+
+
 
