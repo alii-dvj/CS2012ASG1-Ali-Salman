@@ -82,9 +82,9 @@ class Transaction(ABC):
         except:
             raise InvalidTransactionError(f"Invalid amount '{value}'.")
         if number != number or number in (float("inf"), float("-inf")):
-            raise InvalidTransactionError("Invalid amount '{value}'.")
+            raise InvalidTransactionError(f"Invalid amount '{value}'.")
         if number <= 0:
-            raise InvalidTransactionError(f"Aount must be greater than 0 (got {number:g}).")
+            raise InvalidTransactionError(f"Amount must be greater than 0 (got {number:g}).")
         self._amount = number
 
     @property
@@ -117,7 +117,7 @@ class Transaction(ABC):
     def to_export_row(self) -> list:
         return [self.city, self.date, self.time, self.get_type(), f"{self.amount:.2f}", self.status]
 
-    def __repr__self(self):
+    def __repr__(self):
         return (f"{type(self).__name__}({self.city}, {self.date}, "f"{self.time}, {self.amount:.2f}, {self.status})")
 
 
@@ -182,7 +182,7 @@ class CSVLoader(FileLoader):
                 reader = csv.DictReader(f)
                 line_no = 1
                 for row in reader:
-                    Line_no += 1
+                    line_no += 1
                     try:
                         self._try_add(row, results, f"Line {line_no}")
                     except Exception as e:

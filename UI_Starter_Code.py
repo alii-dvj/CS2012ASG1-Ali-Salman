@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from backend import FinPayEngine
 
 
 class FinPayApp(tk.Tk):
@@ -18,7 +19,7 @@ class FinPayApp(tk.Tk):
         container.pack(side="top", fill="both", expand=True)
         container.grid_rowconfigure(0, weight=1)
         container.grid_columnconfigure(0, weight=1)
-
+        self.engine = FinPayEngine()
         # Dictionary to keep track of the frames
         self.frames = {}
 
@@ -64,6 +65,7 @@ class UploadScreen(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        self.filepath = None
 
         # Center content
         self.grid_rowconfigure(0, weight=1)
@@ -95,7 +97,7 @@ class UploadScreen(tk.Frame):
 
         # In a real app, this should only enable after a file is selected
         self.btn_load = ttk.Button(btn_frame, text="Load Data",
-                                   command=lambda: controller.show_frame("DashboardScreen"))
+                                   command=self.load_data)
         self.btn_load.grid(row=0, column=1, padx=10)
 
     def browse_file(self):
@@ -105,6 +107,19 @@ class UploadScreen(tk.Frame):
         )
         if filename:
             self.lbl_filename.config(text=filename.split("/")[-1])  # Show just the file name
+            self.filepath = filename
+
+    def load_data(self):
+        if self.filepath is None:
+            messagebox.showwarning("No file", "Please choose a file first.")
+            return
+        try:
+            self.controller.engine.load_data(self.filepath)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        self.controller.frames["DashboardScreen"].refresh()
+        self.controller.show_frame("DashboardScreen")
 
 
 class DashboardScreen(tk.Frame):
@@ -112,42 +127,67 @@ class DashboardScreen(tk.Frame):
         super().__init__(parent)
         self.controller = controller
 
+        # Time ranges: label -> (from, to)
+        self.time_ranges = {
+            "All": ("", ""),
+            "Night 00-06": ("00:00:00", "05:59:59"),
+            "Morning 06-12": ("06:00:00", "11:59:59"),
+            "Afternoon 12-18": ("12:00:00", "17:59:59"),
+            "Evening 18-24": ("18:00:00", "23:59:59"),
+        }
+
         # Top Bar (Filters)
         filter_frame = ttk.Frame(self, padding=10)
         filter_frame.pack(side="top", fill="x")
 
         ttk.Label(filter_frame, text="Filter by:").pack(side="left", padx=5)
 
+        # City Filter
+        ttk.Label(filter_frame, text="City:").pack(side="left", padx=5)
+        self.cb_city = ttk.Combobox(filter_frame, values=["All"], state="readonly", width=10)
+        self.cb_city.current(0)
+        self.cb_city.pack(side="left", padx=5)
+
         # Date Filter
         ttk.Label(filter_frame, text="Date:").pack(side="left", padx=5)
-        self.cb_date = ttk.Combobox(filter_frame, values=["All", "2026-10-19", "2026-10-18"], state="readonly",
-                                    width=12)
+        self.cb_date = ttk.Combobox(filter_frame, values=["All"], state="readonly", width=11)
         self.cb_date.current(0)
         self.cb_date.pack(side="left", padx=5)
 
+        # Time Filter
+        ttk.Label(filter_frame, text="Time:").pack(side="left", padx=5)
+        self.cb_time = ttk.Combobox(filter_frame, values=list(self.time_ranges),
+                                    state="readonly", width=14)
+        self.cb_time.current(0)
+        self.cb_time.pack(side="left", padx=5)
+
         # Type Filter
         ttk.Label(filter_frame, text="Type:").pack(side="left", padx=5)
-        self.cb_type = ttk.Combobox(filter_frame, values=["All", "Credit", "Debit"], state="readonly", width=10)
+        self.cb_type = ttk.Combobox(filter_frame, values=["All", "Credit", "Debit"],
+                                    state="readonly", width=8)
         self.cb_type.current(0)
         self.cb_type.pack(side="left", padx=5)
 
-        ttk.Button(filter_frame, text="Apply Filters").pack(side="left", padx=15)
-        ttk.Button(filter_frame, text="Clear Filters").pack(side="left", padx=5)
-        ttk.Button(filter_frame, text="Back to Upload", command=lambda: controller.show_frame("UploadScreen")).pack(
-            side="right", padx=5)
+        # Buttons (second row so the window isn't too wide)
+        button_frame = ttk.Frame(self, padding=(10, 0))
+        button_frame.pack(side="top", fill="x")
+
+        ttk.Button(button_frame, text="Apply Filters", command=self.apply_filters).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Clear Filters", command=self.clear_filters).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Revert Last Filter", command=self.revert_filter).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="Back to Upload",
+                   command=lambda: controller.show_frame("UploadScreen")).pack(side="right", padx=5)
 
         # Main Content Area (Treeview)
         columns = ("City", "Date", "Time", "Type", "Amount")
         self.tree = ttk.Treeview(self, columns=columns, show="headings", height=15)
 
-        # Define headings and column widths
         for col in columns:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=120, anchor="center")
 
         self.tree.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
-        # Add scrollbar to Treeview
         scrollbar = ttk.Scrollbar(self.tree, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
@@ -156,20 +196,68 @@ class DashboardScreen(tk.Frame):
         bottom_frame = ttk.Frame(self, padding=10)
         bottom_frame.pack(side="bottom", fill="x")
 
-        ttk.Label(bottom_frame, text="Total Records Loaded: 3").pack(side="left")
-        ttk.Button(bottom_frame, text="Export CSV").pack(side="right")
+        self.lbl_count = ttk.Label(bottom_frame, text="Total Records Loaded: 0")
+        self.lbl_count.pack(side="left")
+        ttk.Button(bottom_frame, text="Export CSV", command=self.export_data).pack(side="right")
 
-        # Insert dummy data for students to see
-        self.insert_dummy_data()
-
-    def insert_dummy_data(self):
-        dummy_data = [
-            ("Karachi", "2026-10-19", "10:30 AM", "Credit", "+ Rs. 50,000"),
-            ("Lahore", "2026-10-19", "11:15 AM", "Debit", "- Rs. 12,000"),
-            ("Islamabad", "2026-10-18", "04:45 PM", "Credit", "+ Rs. 8,500")
-        ]
-        for row in dummy_data:
+    def refresh(self, update_options=True):
+        engine = self.controller.engine
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in engine.get_ui_rows():
             self.tree.insert("", tk.END, values=row)
+        if update_options:
+            self.cb_city["values"] = engine.get_city_options()
+            self.cb_date["values"] = engine.get_date_options()
+            self.cb_city.current(0)
+            self.cb_date.current(0)
+            self.cb_time.current(0)
+            self.cb_type.current(0)
+        self.lbl_count.config(text=f"Total Records Loaded: {len(engine.visible)}")
+
+    def apply_filters(self):
+        time_from, time_to = self.time_ranges[self.cb_time.get()]
+        try:
+            self.controller.engine.apply_filters(
+                city=self.cb_city.get(), date=self.cb_date.get(),
+                ttype=self.cb_type.get(),
+                time_from=time_from, time_to=time_to)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return
+        self.refresh(update_options=False)
+
+    def clear_filters(self):
+        self.controller.engine.clear_filters()
+        self.cb_city.current(0)
+        self.cb_date.current(0)
+        self.cb_time.current(0)
+        self.cb_type.current(0)
+        self.refresh(update_options=False)
+
+    def revert_filter(self):
+        try:
+            self.controller.engine.revert_last_filter()
+        except Exception as e:
+            messagebox.showinfo("Nothing to revert", str(e))
+            return
+        f = self.controller.engine.current_filters
+        self.cb_city.set(f["city"])
+        self.cb_date.set(f["date"])
+        self.cb_type.set(f["type"])
+        for label, rng in self.time_ranges.items():
+            if rng == (f["time_from"], f["time_to"]):
+                self.cb_time.set(label)
+        self.refresh(update_options=False)
+
+    def export_data(self):
+        try:
+            export_path, audit_path = self.controller.engine.export()
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        messagebox.showinfo("Done", f"Saved:\n{export_path}\n{audit_path}")
+
 
 
 if __name__ == "__main__":
